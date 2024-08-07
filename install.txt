@@ -1,0 +1,277 @@
+# mostly copied from https://alexbolli.ch/linux/arch/install-zfs-luks.html
+
+curl -s https://raw.githubusercontent.com/eoli3n/archiso-zfs/master/init | bash
+
+# create partitioning table alongside these lines:
+#   Number  Start   End     Size    File system  Name  Flags
+#    1      1049kB  1075MB  1074MB                     boot, esp
+#    2      1075MB  3222MB  2147MB
+#    3      3222MB  222GB   218GB
+#    4      222GB   256GB   34.4GB
+# partition 1 is for EFI with FAT32 with size of 1G
+# partition 2 is for /boot with EXT4 with size of 2G
+# partition 3 is for root (/) with ZFS
+# partition 4 is for swap with size of at least your RAM or more (double of RAM in my case)
+
+cryptsetup -v luksFormat --type=luks2 /dev/sda2 --pbkdf pbkdf2
+cryptsetup -v luksFormat --type=luks2 /dev/sda3
+cryptsetup -v luksFormat --type=luks2 /dev/sda4
+
+cryptsetup open /dev/sda2 boot_crypt
+cryptsetup open /dev/sda3 root_crypt
+cryptsetup open /dev/sda4 swap_crypt
+
+mkfs.fat -F 32 /dev/sda1
+mkswap /dev/mapper/swap_crypt
+mkfs.ext4 /dev/mapper/boot_crypt
+
+zpool create -f -o ashift=13         \
+             -O acltype=posixacl       \
+             -O relatime=on            \
+             -O xattr=sa               \
+             -O dnodesize=legacy       \
+             -O normalization=formD    \
+             -O mountpoint=none        \
+             -O canmount=off           \
+             -O devices=off            \
+             -R /mnt                   \
+             -O compression=lz4        \
+             zroot /dev/mapper/root_crypt
+#             -o compatibility=grub2    \
+
+
+zfs create -o mountpoint=none zroot/data
+zfs create -o mountpoint=none zroot/ROOT
+zfs create -o mountpoint=/ -o canmount=noauto zroot/ROOT/default
+zfs create -o mountpoint=/home zroot/data/home
+zfs create -o mountpoint=/root zroot/data/home/root
+zfs create -o mountpoint=/var -o canmount=off     zroot/var
+zfs create                                        zroot/var/log
+zfs create -o mountpoint=/var/lib -o canmount=off zroot/var/lib
+zfs create                                        zroot/var/lib/libvirt
+zfs create                                        zroot/var/lib/docker
+
+zpool export zroot
+
+# find id of disk by ls -la /dev/disk/by-id
+zpool import -d /dev/disk/by-id/dm-uuid-CRYPT-LUKS2-938aba84a0f443fe9a2a0fa08509b672-root_crypt -R /mnt zroot -N
+
+zfs mount zroot/ROOT/default
+zfs mount -a
+
+rm /etc/zfs/zpool.cache
+touch /etc/zfs/zpool.cache
+zpool set cachefile=/etc/zfs/zpool.cache zroot
+mkdir -p /mnt/etc/zfs
+cp /etc/zfs/zpool.cache /mnt/etc/zfs/zpool.cache
+
+mkdir -p /mnt/boot
+mount /dev/mapper/boot_crypt /mnt/boot
+mkdir -p /mnt/efi
+mount /dev/sda1 /mnt/efi -o fmask=0077,dmask=0077
+# the fmask and dmask are important, systemd-boot install will throw warnings if otherwise
+
+# generate fstab
+genfstab -U -p /mnt >> /mnt/etc/fstab
+# remember to comment out all non legacy zfs pools
+
+#it is recommended to increase ParallelDownloads to 25 in /etc/pacman.conf so this doesn't take all night. Color and VerbosePkgLists is nice to add as well
+
+pacstrap -i /mnt base dkms base-devel linux linux-firmware linux-headers bash vim efibootmgr git mkinitcpio parted networkmanager wpa_supplicant intel-ucode nano gdisk grub freetype2 fuse3 dosfstools lzop os-prober mtools
+
+arch-chroot /mnt
+
+https://github.com/archzfs/archzfs/wiki
+
+pacman -S zfs-utils zfs-dkms
+
+systemctl enable zfs.target
+systemctl enable zfs-import-cache
+systemctl enable zfs-import-scan
+systemctl enable zfs-share
+systemctl enable zfs-mount
+systemctl enable zfs-zed
+systemctl enable NetworkManager
+
+# edit /etc/mkinitcpio.conf
+# add zfs to modules so they look like this (without leading hashtag [#]):
+#MODULES=(zfs)
+# if using fujitsu laptop add psmouse into modules before zfs
+# edit hooks by adding encrypt resume zfs so they look like this (without leading hashtag [#]):
+#HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt resume zfs filesystems fsck)
+
+# to set time zone
+ln -Sf /usr/share/zoneinfo/Europe/Bratislava /etc/localtime
+hwclock --systohc
+# check https://wiki.archlinux.org/title/Systemd-timesyncd
+
+# edit /etc/locale.gen
+nano /etc/locale.gen
+# and run:
+locale-gen
+
+# create /etc/locale.conf
+nano /etc/locale.conf
+# and insert following:
+LANG=en_US.UTF-8
+LC_TIME=sk_SK.UTF-8
+LC_COLLATE=C
+#end of insertion
+
+# change hostname:
+nano /etc/hostname
+# edit /etc/hosts
+nano /etc/hosts
+#add:
+127.0.0.1 localhost
+127.0.0.1 my-hostname.localdomain my-hostname.local my-hostname
+
+
+# install grub
+grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=ArchLinux
+
+# use blkid to get UUIDs
+# add this to GRUB_CMDLINE_LINUX (not GRUB_CMDLINE_LINUX_DEFAULT) with replacing <UUID> for correct UUIDs where:
+# UUID for root_crypt is UUID of /dev/sda3,
+# UUID for resume is UUID of /dev/mapper/swap_crypt
+
+cryptdevice=UUID=<UUID>:root_crypt zfs=zroot/ROOT/default root=ZFS=zroot/ROOT/default rw resume=UUID=<UUID>
+
+grub-mkconfig -o /boot/grub/grub.cfg
+
+
+umount /dev/sda1
+umount /dev/mapper/boot_crypt
+zfs umount -a
+zfs umount zroot/ROOT/default
+zpool export zroot
+swapoff /dev/mapper/swap_crypt
+cryptsetup close boot_crypt
+cryptsetup close swap_crypt
+cryptsetup close root_crypt
+
+# after rebooting:
+# add lines to /etc/crypttab where UUID for boot_crypt is UUID of /dev/sda2 and UUID for swap_crypt is UUID of /dev/sda4
+boot_crypt UUID=<UUID>
+swap_crypt UUID=<UUID>
+
+# enroll yubikey fido2
+pacman -S libfido2
+
+sudo systemd-cryptenroll --fido2-device=auto --wipe-slot=all --fido2-with-user-verification=true --fido2-credential-algorithm=eddsa /dev/sda4
+
+# if you have screwed up and try to rekey afterwards add password back in with:
+sudo systemd-cryptenroll --password --unlock-fido2-device=auto /dev/sda4
+
+# if you need to find path use systemd-cryptenroll --fido2-device=list
+# to add second fido2 device
+sudo systemd-cryptenroll --fido2-device=/path/of/new/device --wipe-slot=all --fido2-with-user-verification=true --fido2-credential-algorithm=eddsa --unlock-fido2-device=/path/of/old/device /dev/sda4
+
+# to delete password from luks
+sudo systemd-cryptenroll --wipe-slot=password /dev/sda4
+
+# to delete fido2 from luks
+sudo systemd-cryptenroll --wipe-slot=fido2 /dev/sda4
+
+# just make sure you don't wipe all forms of authentication otherwise you're screwed
+
+#repeat for /dev/sda2. Just don't delete password from /dev/sda2 because grub cannot use FIDO2
+sudo systemd-cryptenroll --fido2-device=auto --fido2-with-user-verification=true --fido2-credential-algorithm=eddsa /dev/sda2
+
+#edit /etc/crypttab
+nano /etc/crypttab
+# edit configuration by adding fido2-device=auto into options for both disks similiar to:
+#       swap_crypt      UUID=6791ada1-3db4-4502-b1cd-72a99702b84f       none    luks,fido2-device=auto
+#       root_crypt      UUID=938aba84-a0f4-43fe-9a2a-0fa08509b672       none    luks,fido2-device=auto
+#       boot_crypt      UUID=9d5b13be-bf41-44fd-804f-012237d4cd55       none    luks,fido2-device=auto
+
+//# to allow hybernation
+//https://wiki.archlinux.org/title/Dm-crypt/Swap_encryption#Using_a_swap_partition
+//# but edit the /hooks/openswap script to use --token-only such as: cryptsetup open --token-only /dev/sda4 swap_crypt
+//# optionaly use UUID such as: cryptsetup open --token-only /dev/disk/by-uuid/<UUID> swap_crypt where <UUID> is UUID of /dev/sda4
+# to allow hybernation switch to systemd hooks:
+# install
+# https://aur.archlinux.org/packages/mkinitcpio-sd-zfs
+# replace udev with systemd in hooks
+# replace encrypt with sd-encrypt in hooks
+# replace zfs with sd-zfs in hooks
+# note: do not use openswap or resume hooks
+# referrence sheet: https://wiki.archlinux.org/title/Mkinitcpio#Common_hooks
+# HOOKS=(base systemd autodetect microcode modconf kms block keyboard numlock sd-encrypt sd-zfs filesystems fsck shutdown)
+# move crypttab to crypttab.initramfs
+sudo mv /etc/crypttab to /etc/crypttab.initramfs
+sudo ln -s /etc/crypttab.initramfs /etc/crypttab
+
+# to enable numlock with systemd hook
+# create file /usr/bin/numlock:
+sudo nano /usr/bin/numlock
+
+#!/bin/bash
+for tty in /dev/tty[0-9]; do
+    /usr/bin/setleds -D +num < "$tty"
+done
+
+# create file /usr/lib/initcpio/install/numlock:
+sudo nano /usr/lib/initcpio/install/numlock
+
+#!/bin/bash
+build() {
+    add_binary /bin/bash
+    add_binary /usr/bin/setleds
+    add_binary /usr/bin/numlock
+
+    cat >"$BUILDROOT/usr/lib/systemd/system/numlock.service" <<EOF
+[Unit]
+Description=Numlock before LUKS
+Before=cryptsetup-pre.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/numlock
+EOF
+    add_systemd_unit cryptsetup-pre.target
+
+    cd "$BUILDROOT/usr/lib/systemd/system/sysinit.target.wants" || exit
+
+    ln -sf /usr/lib/systemd/system/cryptsetup-pre.target cryptsetup-pre.target
+
+    ln -sf /usr/lib/systemd/system/numlock.service numlock.service
+
+}
+
+help() {
+    cat <<HELPEOF
+    This hook adds support to enable numlock before sd-encrypt hook is run.
+HELPEOF
+}
+
+# adding rescue shell to systemd initramfs
+# https://unix.stackexchange.com/questions/739638/cannot-open-access-to-console-the-root-account-is-locked-on-parrotos
+
+Run systemctl edit rescue.service with sudo/as root. This will open an editor that will create a /etc/systemd/system/rescue.service.d/override.conf file for you. On older versions of systemd, the editor will be initially blank; on newer versions, there will be some descriptive comments and a commented-out version of the existing rescue.service definition for your information. In both cases, just type in the following two lines:
+
+[Service]
+Environment=SYSTEMD_SULOGIN_FORCE=1
+
+# rebuild initramfs
+sudo mkinitcpio -P
+
+# if you get failed to start generate shutdown-ramfs error on shutdown:
+# outdated: sudo nano /usr/lib/systemd/system/mkinitcpio-generate-shutdown-ramfs.service
+# and set ProtectSystem=full
+sudo systemctl edit mkinitcpio-generate-shutdown-ramfs.service
+# and insert
+[Service]
+ProtectSystem=full
+
+# ykfde
+# WHEN BOOTING PRESS YUBIKEY BEFORE ENTERING PASSWORD
+https://github.com/eworm-de/mkinitcpio-ykfde/blob/main/README-mkinitcpio.md
+# DONT RUN ykfde!!!!!!! THIS DOESN'T work if you kill all other keyslots
+# MAKE SURE TO RUN ykfde --ask-2nd-factor to setup password propperly
+# to change password run ykfde --ask-2nd-factor --ask-new-2nd-factor
+# don't forget to run sudo systemctl enable ykfde.service and ykfde-cpio
+
+# several QoL:
+https://aur.archlinux.org/packages/mkinitcpio-firmware

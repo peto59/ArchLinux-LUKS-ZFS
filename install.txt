@@ -199,7 +199,7 @@ nano /etc/crypttab
 # referrence sheet: https://wiki.archlinux.org/title/Mkinitcpio#Common_hooks
 # HOOKS=(base systemd autodetect microcode modconf kms block keyboard numlock sd-encrypt sd-zfs filesystems fsck shutdown)
 # move crypttab to crypttab.initramfs
-sudo mv /etc/crypttab to /etc/crypttab.initramfs
+sudo mv /etc/crypttab /etc/crypttab.initramfs
 sudo ln -s /etc/crypttab.initramfs /etc/crypttab
 
 # to enable numlock with systemd hook

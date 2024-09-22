@@ -13,6 +13,8 @@ curl -s https://raw.githubusercontent.com/eoli3n/archiso-zfs/master/init | bash
 # partition 3 is for root (/) with ZFS
 # partition 4 is for swap with size of at least your RAM or more (double of RAM in my case)
 
+#CHANGE PARTITION GUID WITH GDISK TO MATCH PARTITION TYPE AND SUPPORT GPT AUTO MOUNTING
+
 cryptsetup -v luksFormat --type=luks2 /dev/sda2 --pbkdf pbkdf2
 cryptsetup -v luksFormat --type=luks2 /dev/sda3
 cryptsetup -v luksFormat --type=luks2 /dev/sda4
@@ -136,6 +138,8 @@ grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=ArchLinux
 # UUID for resume is UUID of /dev/mapper/swap_crypt
 
 cryptdevice=UUID=<UUID>:root_crypt zfs=zroot/ROOT/default root=ZFS=zroot/ROOT/default rw resume=UUID=<UUID>
+#alternatively if using systemd boot use:
+rd.luks.name=<UUID>=root_crypt root=/dev/mapper/root instead of cryptdevice=UUID=<UUID>:root_crypt
 
 grub-mkconfig -o /boot/grub/grub.cfg
 

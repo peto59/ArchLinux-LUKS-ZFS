@@ -1,5 +1,6 @@
 # mostly copied from https://alexbolli.ch/linux/arch/install-zfs-luks.html
 
+#installs zfs into live iso. MAKE SURE ISO HAS SUPPORTED ZFS KERNEL
 curl -s https://raw.githubusercontent.com/eoli3n/archiso-zfs/master/init | bash
 
 # create partitioning table alongside these lines:
@@ -13,7 +14,13 @@ curl -s https://raw.githubusercontent.com/eoli3n/archiso-zfs/master/init | bash
 # partition 3 is for root (/) with ZFS
 # partition 4 is for swap with size of at least your RAM or more (double of RAM in my case)
 
-#CHANGE PARTITION GUID WITH GDISK TO MATCH PARTITION TYPE AND SUPPORT GPT AUTO MOUNTING
+#CHANGE PARTITION GUID (CODE) WITH GDISK TO MATCH PARTITION TYPE AND SUPPORT GPT AUTO MOUNTING
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048         2099199   1024.0 MiB  EF00  EFI
+   2         2099200         6293503   2.0 GiB     8309  BOOT
+   3         6293504      3420489727   1.6 TiB     8309  ROOT
+   4      3420489728      3487598591   32.0 GiB    8309  SWAP
 
 cryptsetup -v luksFormat --type=luks2 /dev/sda2 --pbkdf pbkdf2
 cryptsetup -v luksFormat --type=luks2 /dev/sda3
@@ -83,9 +90,9 @@ pacstrap -i /mnt base dkms base-devel linux linux-firmware linux-headers bash vi
 
 arch-chroot /mnt
 
-https://github.com/archzfs/archzfs/wiki
-
-pacman -S zfs-utils zfs-dkms
+#install zfs from aur:
+#https://aur.archlinux.org/packages/zfs-utils
+#https://aur.archlinux.org/packages/zfs-dkms
 
 systemctl enable zfs.target
 systemctl enable zfs-import-cache
@@ -98,9 +105,12 @@ systemctl enable NetworkManager
 # edit /etc/mkinitcpio.conf
 # add zfs to modules so they look like this (without leading hashtag [#]):
 #MODULES=(zfs)
-# if using fujitsu laptop add psmouse into modules before zfs
+
 # edit hooks by adding encrypt resume zfs so they look like this (without leading hashtag [#]):
 #HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt resume zfs filesystems fsck)
+
+#if you wish to use systemd during boot also add this aur package
+#https://aur.archlinux.org/packages/mkinitcpio-sd-zfs
 
 # to set time zone
 ln -Sf /usr/share/zoneinfo/Europe/Bratislava /etc/localtime
@@ -128,6 +138,37 @@ nano /etc/hosts
 127.0.0.1 localhost
 127.0.0.1 my-hostname.localdomain my-hostname.local my-hostname
 
+# adding rescue shell to systemd initramfs
+# https://unix.stackexchange.com/questions/739638/cannot-open-access-to-console-the-root-account-is-locked-on-parrotos
+
+Run `systemctl edit rescue.service` with sudo/as root. This will open an editor that will create a /etc/systemd/system/rescue.service.d/override.conf file for you. On older versions of systemd, the editor will be initially blank; on newer versions, there will be some descriptive comments and a commented-out version of the existing rescue.service definition for your information. In both cases, just type in the following two lines:
+
+[Service]
+Environment=SYSTEMD_SULOGIN_FORCE=1
+
+# rebuild initramfs
+sudo mkinitcpio -P
+
+# if you get failed to start generate shutdown-ramfs error on shutdown:
+# outdated: sudo nano /usr/lib/systemd/system/mkinitcpio-generate-shutdown-ramfs.service
+# and set ProtectSystem=full
+sudo systemctl edit mkinitcpio-generate-shutdown-ramfs.service
+# and insert
+[Service]
+ProtectSystem=full
+
+# ykfde
+# WHEN BOOTING PRESS YUBIKEY BEFORE ENTERING PASSWORD
+https://github.com/eworm-de/mkinitcpio-ykfde/blob/main/README-mkinitcpio.md
+# DONT RUN ykfde!!!!!!! THIS DOESN'T work if you kill all other keyslots
+# MAKE SURE TO RUN ykfde --ask-2nd-factor to setup password propperly
+# to change password run ykfde --ask-2nd-factor --ask-new-2nd-factor
+# don't forget to run sudo systemctl enable ykfde.service and ykfde-cpio
+
+
+#add trimming and scrubbing timers for zfs
+#https://wiki.archlinux.org/title/ZFS#Scrubbing
+#https://wiki.archlinux.org/title/ZFS#Enabling_TRIM
 
 # install grub
 grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=ArchLinux
@@ -136,6 +177,9 @@ grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=ArchLinux
 # add this to GRUB_CMDLINE_LINUX (not GRUB_CMDLINE_LINUX_DEFAULT) with replacing <UUID> for correct UUIDs where:
 # UUID for root_crypt is UUID of /dev/sda3,
 # UUID for resume is UUID of /dev/mapper/swap_crypt
+
+#alternativelly use unified kernel image for direct kernel boot
+#https://wiki.archlinux.org/title/Unified_kernel_image
 
 cryptdevice=UUID=<UUID>:root_crypt zfs=zroot/ROOT/default root=ZFS=zroot/ROOT/default rw resume=UUID=<UUID>
 #alternatively if using systemd boot use:
@@ -159,40 +203,7 @@ cryptsetup close root_crypt
 boot_crypt UUID=<UUID>
 swap_crypt UUID=<UUID>
 
-# enroll yubikey fido2
-pacman -S libfido2
 
-sudo systemd-cryptenroll --fido2-device=auto --wipe-slot=all --fido2-with-user-verification=true --fido2-credential-algorithm=eddsa /dev/sda4
-
-# if you have screwed up and try to rekey afterwards add password back in with:
-sudo systemd-cryptenroll --password --unlock-fido2-device=auto /dev/sda4
-
-# if you need to find path use systemd-cryptenroll --fido2-device=list
-# to add second fido2 device
-sudo systemd-cryptenroll --fido2-device=/path/of/new/device --wipe-slot=all --fido2-with-user-verification=true --fido2-credential-algorithm=eddsa --unlock-fido2-device=/path/of/old/device /dev/sda4
-
-# to delete password from luks
-sudo systemd-cryptenroll --wipe-slot=password /dev/sda4
-
-# to delete fido2 from luks
-sudo systemd-cryptenroll --wipe-slot=fido2 /dev/sda4
-
-# just make sure you don't wipe all forms of authentication otherwise you're screwed
-
-#repeat for /dev/sda2. Just don't delete password from /dev/sda2 because grub cannot use FIDO2
-sudo systemd-cryptenroll --fido2-device=auto --fido2-with-user-verification=true --fido2-credential-algorithm=eddsa /dev/sda2
-
-#edit /etc/crypttab
-nano /etc/crypttab
-# edit configuration by adding fido2-device=auto into options for both disks similiar to:
-#       swap_crypt      UUID=6791ada1-3db4-4502-b1cd-72a99702b84f       none    luks,fido2-device=auto
-#       root_crypt      UUID=938aba84-a0f4-43fe-9a2a-0fa08509b672       none    luks,fido2-device=auto
-#       boot_crypt      UUID=9d5b13be-bf41-44fd-804f-012237d4cd55       none    luks,fido2-device=auto
-
-//# to allow hybernation
-//https://wiki.archlinux.org/title/Dm-crypt/Swap_encryption#Using_a_swap_partition
-//# but edit the /hooks/openswap script to use --token-only such as: cryptsetup open --token-only /dev/sda4 swap_crypt
-//# optionaly use UUID such as: cryptsetup open --token-only /dev/disk/by-uuid/<UUID> swap_crypt where <UUID> is UUID of /dev/sda4
 # to allow hybernation switch to systemd hooks:
 # install
 # https://aur.archlinux.org/packages/mkinitcpio-sd-zfs
@@ -205,6 +216,10 @@ nano /etc/crypttab
 # move crypttab to crypttab.initramfs
 sudo mv /etc/crypttab /etc/crypttab.initramfs
 sudo ln -s /etc/crypttab.initramfs /etc/crypttab
+
+
+# several QoL:
+https://aur.archlinux.org/packages/mkinitcpio-firmware
 
 # to enable numlock with systemd hook
 # create file /usr/bin/numlock:
@@ -249,33 +264,3 @@ help() {
     This hook adds support to enable numlock before sd-encrypt hook is run.
 HELPEOF
 }
-
-# adding rescue shell to systemd initramfs
-# https://unix.stackexchange.com/questions/739638/cannot-open-access-to-console-the-root-account-is-locked-on-parrotos
-
-Run systemctl edit rescue.service with sudo/as root. This will open an editor that will create a /etc/systemd/system/rescue.service.d/override.conf file for you. On older versions of systemd, the editor will be initially blank; on newer versions, there will be some descriptive comments and a commented-out version of the existing rescue.service definition for your information. In both cases, just type in the following two lines:
-
-[Service]
-Environment=SYSTEMD_SULOGIN_FORCE=1
-
-# rebuild initramfs
-sudo mkinitcpio -P
-
-# if you get failed to start generate shutdown-ramfs error on shutdown:
-# outdated: sudo nano /usr/lib/systemd/system/mkinitcpio-generate-shutdown-ramfs.service
-# and set ProtectSystem=full
-sudo systemctl edit mkinitcpio-generate-shutdown-ramfs.service
-# and insert
-[Service]
-ProtectSystem=full
-
-# ykfde
-# WHEN BOOTING PRESS YUBIKEY BEFORE ENTERING PASSWORD
-https://github.com/eworm-de/mkinitcpio-ykfde/blob/main/README-mkinitcpio.md
-# DONT RUN ykfde!!!!!!! THIS DOESN'T work if you kill all other keyslots
-# MAKE SURE TO RUN ykfde --ask-2nd-factor to setup password propperly
-# to change password run ykfde --ask-2nd-factor --ask-new-2nd-factor
-# don't forget to run sudo systemctl enable ykfde.service and ykfde-cpio
-
-# several QoL:
-https://aur.archlinux.org/packages/mkinitcpio-firmware
